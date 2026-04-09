@@ -512,10 +512,11 @@ let recognition     = null;
 let isListening     = false;
 let currentLang     = 'en-IN'; // en-IN = Hinglish/Indian English (default), hi-IN = pure Hindi
 
-// Google OAuth state (kept in memory — tokens expire, never persist to storage)
+// Google OAuth state
 let tokenClient     = null;
 let googleToken     = null;
 let tokenExpiry     = 0;
+let silentRefresh   = false; // true when refreshing in background (no UI message)
 
 // Pending reminder store: id → reminder object
 const pendingMap    = new Map();
@@ -550,34 +551,63 @@ function initGoogleAuth() {
     scope:     'https://www.googleapis.com/auth/calendar.events',
     callback:  onGoogleToken,
   });
+
+  // Restore saved token if still valid
+  const savedToken  = localStorage.getItem('g_cal_token');
+  const savedExpiry = parseInt(localStorage.getItem('g_cal_expiry') || '0');
+
+  if (savedToken && Date.now() < savedExpiry) {
+    googleToken = savedToken;
+    tokenExpiry = savedExpiry;
+  }
+  // Always show ✅ in header if user has ever connected before
+  // (token will be refreshed silently when they next send a message)
+  syncCalStatus();
 }
 
 /* Called by GIS after user completes OAuth flow */
 function onGoogleToken(resp) {
+  const wasSilent = silentRefresh;
+  silentRefresh   = false;
+
   if (resp.error) {
-    addBubble('received', '❌ Google sign-in failed: ' + resp.error);
+    // Silent refresh failed quietly — user just needs to tap 📅 manually
+    if (!wasSilent) {
+      addBubble('received', '❌ Google sign-in failed: ' + resp.error);
+    }
     syncCalStatus();
     return;
   }
-  googleToken  = resp.access_token;
-  tokenExpiry  = Date.now() + (resp.expires_in - 60) * 1000;   // 1 min safety buffer
+
+  googleToken = resp.access_token;
+  tokenExpiry = Date.now() + (resp.expires_in - 60) * 1000;
+
+  // ── Persist token so next page load restores it automatically ──
+  localStorage.setItem('g_cal_token',  googleToken);
+  localStorage.setItem('g_cal_expiry', tokenExpiry.toString());
+
   syncCalStatus();
 
-  // If the user clicked "Add to Calendar" on a specific reminder before auth
   if (pendingRid !== null) {
     const rid = pendingRid;
     pendingRid = null;
     addReminderById(rid);
-  } else {
-    // General connect — just confirm
+  } else if (!wasSilent) {
+    // Only show message for explicit (manual) connects
     addBubble('received',
       '✅ Google Calendar se connect ho gaya! Ab aapke reminders automatically calendar mein add honge. 🗓️'
     );
   }
 }
 
+// Has a live valid token right now
 function isCalConnected() {
-  return googleToken && Date.now() < tokenExpiry;
+  return !!(googleToken && Date.now() < tokenExpiry);
+}
+
+// Has ever connected (token may be expired but we can refresh on demand)
+function hasCalEverConnected() {
+  return !!localStorage.getItem('g_cal_token');
 }
 
 /* Update header button + settings modal status */
@@ -585,7 +615,7 @@ function syncCalStatus() {
   const btn    = document.getElementById('calBtn');
   const line   = document.getElementById('gcalStatusLine');
   const gbtn   = document.getElementById('gcalConnectBtn');
-  const ok     = isCalConnected();
+  const ok     = isCalConnected() || hasCalEverConnected(); // show ✅ if ever connected
 
   btn.textContent = ok ? '✅' : '📅';
   btn.classList.toggle('connected', ok);
@@ -622,6 +652,39 @@ function connectGoogle() {
   }
   // prompt: '' = silent refresh if already consented; 'consent' forces the chooser
   tokenClient.requestAccessToken({ prompt: isCalConnected() ? '' : 'consent' });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TOKEN REFRESH (called just before any Calendar API call)
+═══════════════════════════════════════════════════════════ */
+function ensureCalToken() {
+  // If token still valid, nothing to do
+  if (isCalConnected()) return Promise.resolve();
+
+  // Token expired or missing — refresh silently using stored consent
+  // This works because it's triggered by a user action (tapping Send / Add)
+  return new Promise((resolve, reject) => {
+    const prev = tokenClient.callback;
+    tokenClient.callback = (resp) => {
+      tokenClient.callback = prev;
+      if (resp.error) {
+        // Silent refresh failed — clear storage so user sees 📅 and reconnects
+        localStorage.removeItem('g_cal_token');
+        localStorage.removeItem('g_cal_expiry');
+        syncCalStatus();
+        reject(new Error('Calendar session expire ho gayi. Upar 📅 tap karke dobara connect karein.'));
+      } else {
+        googleToken = resp.access_token;
+        tokenExpiry = Date.now() + (resp.expires_in - 60) * 1000;
+        localStorage.setItem('g_cal_token',  googleToken);
+        localStorage.setItem('g_cal_expiry', tokenExpiry.toString());
+        syncCalStatus();
+        resolve();
+      }
+    };
+    silentRefresh = true;
+    tokenClient.requestAccessToken({ prompt: '' }); // no popup if already consented
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -684,6 +747,7 @@ async function addReminderById(rid) {
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="btn-icon">⏳</span> Adding…'; }
 
   try {
+    await ensureCalToken();
     const calEvent = await createCalendarEvent(r);
     // Store event ID so user can delete it later
     recentCalEvents.push({ task: r.task, date: r.date, calEventId: calEvent.id });
@@ -720,6 +784,7 @@ async function handleDelete(result) {
   const tid = showTyping();
 
   try {
+    await ensureCalToken();
     // Search Calendar for each query and collect matching event IDs
     const toDelete = new Map(); // id → summary (deduplicate)
 
@@ -943,7 +1008,7 @@ async function showReminder(r) {
   // Build the calendar status section
   let calHtml = `<div class="cal-status" id="calwrap-${rid}">`;
 
-  if (isCalConnected()) {
+  if (isCalConnected() || hasCalEverConnected()) {
     // Try to add automatically — show a temporary loading state first
     calHtml += `<button class="cal-add-btn" disabled><span class="btn-icon">⏳</span> Adding to calendar…</button>`;
   } else {
@@ -963,8 +1028,8 @@ async function showReminder(r) {
 
   addBubble('received', r.message, card);
 
-  // If already connected, auto-add in the background now that DOM is ready
-  if (isCalConnected()) {
+  // If connected (or ever was), auto-add in the background now that DOM is ready
+  if (isCalConnected() || hasCalEverConnected()) {
     // Small tick to let the DOM render the bubble first
     await new Promise(r => setTimeout(r, 80));
     addReminderById(rid);
