@@ -412,6 +412,56 @@
       border-color: var(--green-dark);
     }
 
+    /* ── Event list (for /list and /done) ── */
+    .event-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+
+    .event-item {
+      background: #f8fffe;
+      border: 1px solid #e0f2f1;
+      border-radius: 10px;
+      padding: 9px 11px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .event-item-info { flex: 1; min-width: 0; }
+    .event-item-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .event-item-meta { font-size: 12px; color: var(--text-sub); margin-top: 2px; }
+
+    .done-btn {
+      background: var(--green-light);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .done-btn:active { opacity: .8; }
+
+    /* urgent reminder badge */
+    .urgent-badge {
+      display: inline-block;
+      background: #fff3e0;
+      color: #e65100;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 10px;
+      margin-left: 5px;
+      vertical-align: middle;
+    }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -526,6 +576,9 @@ let   pendingRid    = null;
 
 // Recently added calendar events: { id, task, calEventId }
 const recentCalEvents = [];
+
+// When Claude asks "kis time ke liye?" — stores partial reminder waiting for time
+let pendingTimeRequest = null; // { task, date, display_date, priority }
 
 /* ═══════════════════════════════════════════════════════════
    BOOT
@@ -691,10 +744,11 @@ function ensureCalToken() {
    GOOGLE CALENDAR API
 ═══════════════════════════════════════════════════════════ */
 async function createCalendarEvent(r) {
-  const startMs  = new Date(`${r.date}T${r.time}:00`).getTime();
-  const endMs    = startMs + 60 * 60 * 1000;   // default 1-hour event
-  const startISO = new Date(startMs).toISOString();
-  const endISO   = new Date(endMs).toISOString();
+  const startMs     = new Date(`${r.date}T${r.time}:00`).getTime();
+  const endMs       = startMs + 60 * 60 * 1000;
+  const startISO    = new Date(startMs).toISOString();
+  const endISO      = new Date(endMs).toISOString();
+  const reminderMin = r.priority === 'urgent' ? 30 : 10;
 
   const event = {
     summary: r.task,
@@ -702,7 +756,7 @@ async function createCalendarEvent(r) {
     end:     { dateTime: endISO,   timeZone: TIMEZONE },
     reminders: {
       useDefault: false,
-      overrides:  [{ method: 'popup', minutes: 10 }],
+      overrides:  [{ method: 'popup', minutes: reminderMin }],
     },
   };
 
@@ -751,10 +805,11 @@ async function addReminderById(rid) {
     const calEvent = await createCalendarEvent(r);
     // Store event ID so user can delete it later
     recentCalEvents.push({ task: r.task, date: r.date, calEventId: calEvent.id });
+    const mins = r.priority === 'urgent' ? 30 : 10;
     wrap.innerHTML = `
       <div class="cal-added">
         ✅ Google Calendar mein add ho gaya!
-        <span style="font-weight:400;font-size:12px">10 min pehle reminder milega</span>
+        <span style="font-weight:400;font-size:12px">${mins} min pehle reminder milega</span>
       </div>`;
   } catch (err) {
     wrap.innerHTML = `
@@ -858,13 +913,16 @@ function saveSettings() {
 ═══════════════════════════════════════════════════════════ */
 function greet() {
   addBubble('received',
-    'Namaste! 🙏 Main aapka personal reminder assistant hoon.\n\n' +
-    'Mujhe Hindi, English ya Hinglish mein batayein:\n\n' +
-    '• "Kal subah 9 baje gym jaana hai"\n' +
-    '• "Doctor appointment Friday 3pm"\n' +
-    '• "Remind me to call Rahul at 6 PM today"\n\n' +
-    'Google Calendar connect karne ke liye upar 📅 tap karein.\n\n' +
-    'Boliye, kya reminder chahiye? 😊'
+    'Namaste! 🙏 Main hoon aapka personal reminder assistant!\n\n' +
+    'Kuch bhi bol sakte ho — Hindi, English ya Hinglish:\n\n' +
+    '• "Kal subah doctor ko call karna hai"\n' +
+    '• "Urgent! Meeting at 3pm today"\n' +
+    '• "Remind me to pay bill this Friday"\n\n' +
+    'Commands:\n' +
+    '📋 /list — upcoming reminders dekho\n' +
+    '✅ /done — koi task complete karo\n\n' +
+    '📅 upar tap karke Google Calendar connect karo.\n\n' +
+    'Batao, kya set karoon? 😊'
   );
 }
 
@@ -880,6 +938,20 @@ async function send() {
   const text = el.value.trim();
   if (!text) return;
 
+  // ── Slash commands ──
+  if (text.toLowerCase().startsWith('/list')) {
+    addBubble('sent', text);
+    el.value = ''; autoGrow(el);
+    await handleListCommand();
+    return;
+  }
+  if (text.toLowerCase().startsWith('/done')) {
+    addBubble('sent', text);
+    el.value = ''; autoGrow(el);
+    await handleDoneCommand();
+    return;
+  }
+
   addBubble('sent', text);
   el.value = '';
   autoGrow(el);
@@ -887,14 +959,27 @@ async function send() {
   const tid = showTyping();
 
   try {
-    const result = await askClaude(text);
+    // ── If waiting for a time reply, resolve it ──
+    let result;
+    if (pendingTimeRequest) {
+      result = await extractTimeForPending(text);
+    } else {
+      result = await askClaude(text);
+    }
+
     removeTyping(tid);
-    if (result.intent === 'delete') {
+
+    if (result.intent === 'ask_time') {
+      // Store partial reminder, ask user for time
+      pendingTimeRequest = { task: result.task, date: result.date, display_date: result.display_date, priority: result.priority || 'normal' };
+      addBubble('received', result.message);
+    } else if (result.intent === 'delete') {
       await handleDelete(result);
     } else if (result.intent === 'chat') {
       addBubble('received', result.message);
     } else {
-      await showReminder(result); // 'add' intent
+      pendingTimeRequest = null;
+      await showReminder(result);
     }
   } catch (err) {
     removeTyping(tid);
@@ -915,41 +1000,56 @@ async function askClaude(userText) {
       recentCalEvents.slice(-5).map((e,i) => `${i+1}. "${e.task}" on ${e.date} (calEventId: ${e.calEventId})`).join('\n')
     : '';
 
-  const system = `You are a friendly reminder assistant that understands Hindi, English, and Hinglish.
+  const system = `You are Remi — a warm, witty personal reminder assistant who speaks Hindi, English, and Hinglish fluently. You talk like a helpful dost (friend), not a robot. Keep replies short, friendly, and fun. Use emojis naturally.
 
 Today is ${today} (${dow}).${recentContext}
 
-Understand the user's INTENT and return ONLY a valid JSON object — no explanation, no markdown fences.
+Return ONLY a valid JSON object — no explanation, no markdown.
 
-Hindi/Hinglish hints:
-- kal = tomorrow | aaj = today | parso = day after tomorrow
-- subah = morning (default 09:00) | dopahar = afternoon (default 13:00)
-- shaam = evening (default 18:00) | raat = night (default 21:00)
-- baje = o'clock e.g. "9 baje" → 09:00
+━━ HINDI/HINGLISH VOCABULARY ━━
+kal = tomorrow | aaj = today | parso = day after tomorrow | परसों = day after tomorrow
+subah = morning (09:00) | dopahar = afternoon (13:00) | shaam = evening (18:00) | raat = night (21:00)
+baje = o'clock → "9 baje" = 09:00 | "saadhe 9" = 09:30 | "paune 10" = 09:45
+abhi / turant = now/immediately | jaldi = soon
 
-INTENT 1 — Adding a reminder. Return:
+━━ PRIORITY DETECTION ━━
+If message contains: urgent, important, zaruri, jaldi, turant, asap, critical → priority = "urgent" (30 min reminder)
+Otherwise → priority = "normal" (10 min reminder)
+
+━━ INTENT 1 — Add reminder (time IS mentioned) ━━
 {
   "intent": "add",
-  "task": "<short task title>",
+  "task": "<short friendly task title in user's language>",
   "date": "<YYYY-MM-DD>",
   "time": "<HH:MM>",
-  "display_date": "<e.g. 'Kal, 10 April'>",
+  "display_date": "<e.g. 'Kal, 10 April' or 'Aaj' or 'Shukravar, 11 April'>",
   "display_time": "<e.g. '9:00 AM'>",
-  "message": "<warm confirmation in user's language with emoji>"
+  "priority": "normal" | "urgent",
+  "message": "<1-2 line warm friendly reply in user's language mix, confirm task+time, add relevant emoji. Sound like a friend, not a bot.>"
 }
 
-INTENT 2 — Deleting/removing reminders. Return:
+━━ INTENT 2 — Add reminder (NO time mentioned) ━━
+{
+  "intent": "ask_time",
+  "task": "<extracted task>",
+  "date": "<YYYY-MM-DD>",
+  "display_date": "<friendly date>",
+  "priority": "normal" | "urgent",
+  "message": "<Ask for time in a friendly way e.g. 'Sure! ${`${today.split('-')[2]} ${new Date(today).toLocaleString('en-IN',{month:'short'})}`} ko ${`<task>`} ke liye — kis time set karoon? ⏰'>"
+}
+Use this when task and date are clear but NO specific time (hour) is mentioned.
+
+━━ INTENT 3 — Delete/remove reminders ━━
 {
   "intent": "delete",
-  "search_queries": ["<keyword to search event 1>", "<keyword to search event 2>"],
-  "message": "<confirmation message in user's language>"
+  "search_queries": ["<keyword1>", "<keyword2>"],
+  "message": "<friendly confirmation in user's language>"
 }
-Extract meaningful search keywords from the user's message or from the recent reminders context. If user says "dono" or "both", include search terms for all recent reminders. Always return at least one search query if any reminders were mentioned.
 
-INTENT 3 — General chat / question (not a reminder). Return:
+━━ INTENT 4 — General chat ━━
 {
   "intent": "chat",
-  "message": "<helpful reply in the same language>"
+  "message": "<helpful, friendly reply in user's language. If they seem confused, gently explain what you can do.>"
 }`;
 
   let res;
@@ -999,6 +1099,164 @@ INTENT 3 — General chat / question (not a reminder). Return:
 }
 
 /* ═══════════════════════════════════════════════════════════
+   FOLLOW-UP: extract time when user replies to ask_time
+═══════════════════════════════════════════════════════════ */
+async function extractTimeForPending(timeText) {
+  const p = pendingTimeRequest;
+  const system = `Extract ONLY the time from the user's reply and return JSON.
+Task: "${p.task}", Date: "${p.date}", Display date: "${p.display_date}", Priority: "${p.priority}"
+
+User is giving the time. Parse it and return:
+{
+  "intent": "add",
+  "task": "${p.task}",
+  "date": "${p.date}",
+  "time": "<HH:MM>",
+  "display_date": "${p.display_date}",
+  "display_time": "<e.g. '10:00 AM'>",
+  "priority": "${p.priority}",
+  "message": "<friendly 1-line confirmation in Hinglish with emoji>"
+}
+
+Hints: "9 baje"=09:00, "3pm"=15:00, "saadhe 9"=09:30, "dopahar 2"=14:00, "shaam 6"=18:00`;
+
+  let res;
+  try {
+    res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 256, system, messages: [{ role: 'user', content: timeText }] }),
+    });
+  } catch (e) { throw new Error('Network error: ' + e.message); }
+
+  const data  = await res.json();
+  let raw = data.content[0].text.trim().replace(/^```(?:json)?\n?/i,'').replace(/\n?```$/i,'').trim();
+  try { return JSON.parse(raw); } catch { return { intent: 'chat', message: 'Samajh nahi aaya. Kya aap time dobara bata sakte ho? Jaise "9 baje" ya "3pm" 🕐' }; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   /LIST — show upcoming reminders
+═══════════════════════════════════════════════════════════ */
+async function handleListCommand() {
+  if (!hasCalEverConnected()) {
+    addBubble('received', '📅 Pehle Google Calendar connect karo — upar 📅 tap karo!');
+    return;
+  }
+  const tid = showTyping();
+  try {
+    await ensureCalToken();
+    const timeMin = new Date().toISOString();
+    const timeMax = new Date(Date.now() + 7 * 86400000).toISOString();
+    const params  = new URLSearchParams({ timeMin, timeMax, singleEvents:'true', orderBy:'startTime', maxResults:'15' });
+    const res     = await fetch(`${CALENDAR_URL}?${params}`, { headers: { 'Authorization': `Bearer ${googleToken}` } });
+    const data    = await res.json();
+    removeTyping(tid);
+
+    const events = (data.items || []).filter(e => e.status !== 'cancelled');
+    if (events.length === 0) {
+      addBubble('received', '🎉 Agle 7 dinon mein koi reminder nahi hai!\nRelax karo 😄');
+      return;
+    }
+
+    let listHtml = '<div class="event-list">';
+    events.forEach(ev => {
+      const start   = ev.start?.dateTime || ev.start?.date;
+      const dt      = start ? new Date(start) : null;
+      const dateStr = dt ? dt.toLocaleDateString('en-IN', { weekday:'short', day:'numeric', month:'short' }) : '';
+      const timeStr = dt && ev.start?.dateTime ? dt.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:true }) : 'All day';
+      listHtml += `
+        <div class="event-item">
+          <div class="event-item-info">
+            <div class="event-item-title">${esc(ev.summary || 'Untitled')}</div>
+            <div class="event-item-meta">📅 ${esc(dateStr)} &nbsp;⏰ ${esc(timeStr)}</div>
+          </div>
+        </div>`;
+    });
+    listHtml += '</div>';
+
+    addBubble('received', `📋 Agle 7 din ke ${events.length} reminders:`, listHtml);
+  } catch (err) {
+    removeTyping(tid);
+    addBubble('received', '❌ List nahi aa payi: ' + err.message);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   /DONE — show events with complete buttons
+═══════════════════════════════════════════════════════════ */
+async function handleDoneCommand() {
+  if (!hasCalEverConnected()) {
+    addBubble('received', '📅 Pehle Google Calendar connect karo — upar 📅 tap karo!');
+    return;
+  }
+  const tid = showTyping();
+  try {
+    await ensureCalToken();
+    const timeMin = new Date().toISOString();
+    const timeMax = new Date(Date.now() + 7 * 86400000).toISOString();
+    const params  = new URLSearchParams({ timeMin, timeMax, singleEvents:'true', orderBy:'startTime', maxResults:'15' });
+    const res     = await fetch(`${CALENDAR_URL}?${params}`, { headers: { 'Authorization': `Bearer ${googleToken}` } });
+    const data    = await res.json();
+    removeTyping(tid);
+
+    const events = (data.items || []).filter(e => e.status !== 'cancelled');
+    if (events.length === 0) {
+      addBubble('received', '🎉 Koi pending reminder nahi hai — sab done!');
+      return;
+    }
+
+    // Store events for the done buttons to reference
+    const doneMapId = 'donemap_' + Date.now();
+    window[doneMapId] = events;
+
+    let listHtml = '<div class="event-list">';
+    events.forEach((ev, i) => {
+      const start   = ev.start?.dateTime || ev.start?.date;
+      const dt      = start ? new Date(start) : null;
+      const dateStr = dt ? dt.toLocaleDateString('en-IN', { weekday:'short', day:'numeric', month:'short' }) : '';
+      const timeStr = dt && ev.start?.dateTime ? dt.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:true }) : '';
+      listHtml += `
+        <div class="event-item" id="doneitem-${ev.id}">
+          <div class="event-item-info">
+            <div class="event-item-title">${esc(ev.summary || 'Untitled')}</div>
+            <div class="event-item-meta">📅 ${esc(dateStr)} ${timeStr ? '&nbsp;⏰ ' + esc(timeStr) : ''}</div>
+          </div>
+          <button class="done-btn" onclick="markEventDone('${ev.id}', '${esc(ev.summary||'Task')}', this)">✅ Done</button>
+        </div>`;
+    });
+    listHtml += '</div>';
+
+    addBubble('received', '✅ Kaunsa task complete hua? Tap karo:', listHtml);
+  } catch (err) {
+    removeTyping(tid);
+    addBubble('received', '❌ Events load nahi hue: ' + err.message);
+  }
+}
+
+async function markEventDone(eventId, taskName, btnEl) {
+  btnEl.disabled = true;
+  btnEl.textContent = '⏳';
+  try {
+    await ensureCalToken();
+    const res = await fetch(`${CALENDAR_URL}/${eventId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${googleToken}` },
+    });
+    if (res.ok || res.status === 204 || res.status === 404) {
+      const item = document.getElementById(`doneitem-${eventId}`);
+      if (item) item.style.opacity = '0.4';
+      addBubble('received', `🎉 "${taskName}" — Done! Bahut badiya! ✅`);
+    } else {
+      btnEl.disabled = false; btnEl.textContent = '✅ Done';
+      addBubble('received', '❌ Delete nahi hua. Dobara try karo.');
+    }
+  } catch (err) {
+    btnEl.disabled = false; btnEl.textContent = '✅ Done';
+    addBubble('received', '❌ Error: ' + err.message);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
    SHOW REMINDER + AUTO-ADD TO CALENDAR
 ═══════════════════════════════════════════════════════════ */
 async function showReminder(r) {
@@ -1018,9 +1276,12 @@ async function showReminder(r) {
   }
   calHtml += `</div>`;
 
+  const urgentBadge = r.priority === 'urgent'
+    ? '<span class="urgent-badge">🔥 URGENT — 30 min reminder</span>' : '';
+
   const card = `
     <div class="reminder-card">
-      <div class="card-row"><span class="ci">📌</span><span>${esc(r.task)}</span></div>
+      <div class="card-row"><span class="ci">📌</span><span>${esc(r.task)}${urgentBadge}</span></div>
       <div class="card-row"><span class="ci">📅</span><span>${esc(r.display_date)}</span></div>
       <div class="card-row"><span class="ci">⏰</span><span>${esc(r.display_time)}</span></div>
       ${calHtml}
