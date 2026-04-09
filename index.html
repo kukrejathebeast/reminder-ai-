@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#075E54" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Reminder AI</title>
+
+  <!-- Google Identity Services — loads OAuth 2.0 token client -->
+  <script src="https://accounts.google.com/gsi/client" onload="initGoogleAuth()" async defer></script>
+
+  <style>
+    /* ── Reset ── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --green-dark:  #075E54;
+      --green-mid:   #128C7E;
+      --green-light: #25D366;
+      --chat-bg:     #ECE5DD;
+      --bubble-sent: #DCF8C6;
+      --bubble-recv: #FFFFFF;
+      --text-main:   #111B21;
+      --text-sub:    #667781;
+      --text-meta:   #8696A0;
+      --cal-blue:    #1a73e8;
+    }
+
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--chat-bg);
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      position: fixed;
+      width: 100%;
+      top: 0; left: 0;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: var(--green-dark);
+      color: #fff;
+      padding: 0 14px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+      box-shadow: 0 1px 4px rgba(0,0,0,.35);
+      z-index: 10;
+    }
+    .avatar {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      background: var(--green-light);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px; flex-shrink: 0;
+    }
+    .header-text h1 { font-size: 17px; font-weight: 600; }
+    .header-text p  { font-size: 12px; opacity: .85; }
+
+    .header-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .hdr-btn {
+      background: transparent;
+      border: none;
+      color: rgba(255,255,255,.85);
+      font-size: 20px;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 50%;
+      line-height: 1;
+      transition: background .15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .hdr-btn:active { background: rgba(255,255,255,.15); }
+
+    /* Calendar button states */
+    #calBtn        { font-size: 18px; }
+    #calBtn.connected { color: #69f0ae; }
+
+    /* ── Chat area ── */
+    .chat-area {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      padding: 8px 8px 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      background-color: var(--chat-bg);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Ccircle cx='10' cy='10' r='1.5' fill='%23c5b8a8' fill-opacity='.4'/%3E%3Ccircle cx='50' cy='40' r='1.5' fill='%23c5b8a8' fill-opacity='.4'/%3E%3C/svg%3E");
+    }
+    .chat-area::-webkit-scrollbar       { width: 3px; }
+    .chat-area::-webkit-scrollbar-thumb { background: rgba(0,0,0,.18); border-radius: 3px; }
+
+    /* ── Date chip ── */
+    .date-chip { text-align: center; margin: 6px 0 2px; }
+    .date-chip span {
+      display: inline-block;
+      background: rgba(225,245,254,.92);
+      color: #546E7A;
+      font-size: 12px;
+      padding: 3px 12px;
+      border-radius: 8px;
+      box-shadow: 0 1px 1px rgba(0,0,0,.08);
+    }
+
+    /* ── Bubble wrapper ── */
+    .bwrap {
+      display: flex;
+      flex-direction: column;
+      max-width: 82%;
+      animation: popIn .18s ease-out;
+    }
+    @keyframes popIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .bwrap.sent     { align-self: flex-end;   align-items: flex-end; }
+    .bwrap.received { align-self: flex-start; align-items: flex-start; }
+
+    /* ── Bubble ── */
+    .bubble {
+      padding: 7px 11px 6px;
+      border-radius: 12px;
+      font-size: 15px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .bubble.sent {
+      background: var(--bubble-sent);
+      color: var(--text-main);
+      border-bottom-right-radius: 3px;
+    }
+    .bubble.received {
+      background: var(--bubble-recv);
+      color: var(--text-main);
+      border-bottom-left-radius: 3px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.12);
+    }
+    .bubble-time {
+      font-size: 11px;
+      color: var(--text-meta);
+      margin-top: 2px;
+      padding: 0 3px;
+    }
+
+    /* ── Reminder card ── */
+    .reminder-card {
+      margin-top: 9px;
+      background: rgba(37,211,102,.11);
+      border-left: 3px solid var(--green-light);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .card-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      font-size: 13.5px;
+      color: #2d3748;
+      margin: 3px 0;
+      line-height: 1.3;
+    }
+    .card-row .ci { flex-shrink: 0; font-size: 15px; }
+
+    /* Calendar status inside card */
+    .cal-status {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(0,0,0,.07);
+    }
+    .cal-added {
+      font-size: 13px;
+      color: #1e7e34;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .cal-error-msg {
+      font-size: 12px;
+      color: #c0392b;
+    }
+
+    /* "Add to Calendar" button inside card */
+    .cal-add-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--cal-blue);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      width: 100%;
+      justify-content: center;
+      transition: opacity .15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .cal-add-btn:active  { opacity: .85; }
+    .cal-add-btn:disabled { opacity: .6; cursor: default; }
+    .cal-add-btn .btn-icon { font-size: 16px; }
+
+    /* ── Typing dots ── */
+    .typing-wrap { align-self: flex-start; animation: popIn .18s ease-out; }
+    .typing-dots {
+      background: var(--bubble-recv);
+      border-radius: 12px;
+      border-bottom-left-radius: 3px;
+      padding: 13px 16px;
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      box-shadow: 0 1px 2px rgba(0,0,0,.12);
+    }
+    .typing-dots span {
+      width: 8px; height: 8px;
+      background: #90A4AE;
+      border-radius: 50%;
+      animation: bounce 1.2s infinite;
+    }
+    .typing-dots span:nth-child(2) { animation-delay: .18s; }
+    .typing-dots span:nth-child(3) { animation-delay: .36s; }
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0);    opacity: .5; }
+      30%            { transform: translateY(-6px); opacity: 1; }
+    }
+
+    /* ── Input bar ── */
+    .input-bar {
+      background: #F0F2F5;
+      border-top: 1px solid #D9DEE3;
+      padding: 7px 10px;
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .input-pill {
+      flex: 1;
+      background: #fff;
+      border-radius: 24px;
+      display: flex;
+      align-items: flex-end;
+      padding: 8px 14px;
+      gap: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.1);
+      min-height: 44px;
+    }
+    #msgInput {
+      flex: 1;
+      border: none;
+      outline: none;
+      font-size: 16px;
+      background: transparent;
+      color: var(--text-main);
+      resize: none;
+      max-height: 100px;
+      line-height: 1.4;
+      font-family: inherit;
+      -webkit-appearance: none;
+    }
+    #msgInput::placeholder { color: #9AA3AB; }
+
+    .round-btn {
+      width: 46px; height: 46px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      flex-shrink: 0;
+      transition: transform .15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .round-btn:active { transform: scale(.93); }
+
+    .mic-btn {
+      background: #fff;
+      color: var(--text-sub);
+      box-shadow: 0 1px 4px rgba(0,0,0,.18);
+    }
+    .mic-btn.recording {
+      background: #e53935;
+      color: #fff;
+      box-shadow: 0 0 0 5px rgba(229,57,53,.28);
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50%       { transform: scale(1.06); }
+    }
+    .send-btn {
+      background: var(--green-light);
+      color: #fff;
+      box-shadow: 0 2px 6px rgba(37,211,102,.45);
+    }
+
+    /* ── Modals ── */
+    .overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.55);
+      z-index: 200;
+      display: flex; align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    .modal {
+      background: #fff;
+      border-radius: 18px;
+      padding: 26px 22px 22px;
+      width: 100%; max-width: 420px;
+      box-shadow: 0 24px 64px rgba(0,0,0,.3);
+    }
+    .modal h2   { font-size: 19px; margin-bottom: 8px; color: var(--text-main); }
+    .modal p    { font-size: 14px; color: var(--text-sub); line-height: 1.55; margin-bottom: 16px; }
+    .modal label { font-size: 13px; font-weight: 600; color: var(--text-sub); display: block; margin-bottom: 5px; margin-top: 12px; }
+    .modal input {
+      width: 100%;
+      padding: 12px 14px;
+      border: 2px solid #e0e0e0;
+      border-radius: 12px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .2s;
+      font-family: monospace;
+    }
+    .modal input:focus { border-color: var(--green-light); }
+    .modal-save {
+      width: 100%;
+      padding: 14px;
+      background: var(--green-light);
+      color: #fff;
+      border: none;
+      border-radius: 13px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 18px;
+    }
+    .modal-save:active { opacity: .88; }
+
+    /* Cal connect button in modal */
+    .gcal-connect-btn {
+      width: 100%;
+      padding: 13px;
+      background: var(--cal-blue);
+      color: #fff;
+      border: none;
+      border-radius: 13px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .gcal-connect-btn:active { opacity: .85; }
+    .gcal-status-line {
+      font-size: 13px;
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      text-align: center;
+      font-weight: 500;
+    }
+    .gcal-status-line.ok  { background: #e8f5e9; color: #2e7d32; }
+    .gcal-status-line.off { background: #fff3e0; color: #e65100; }
+
+    .modal-divider {
+      border: none;
+      border-top: 1px solid #eee;
+      margin: 18px 0 14px;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- ─── Settings Modal ─────────────────────────────────────────────────── -->
+<div class="overlay hidden" id="settingsOverlay">
+  <div class="modal">
+    <h2>⚙️ Settings</h2>
+    <p>Aapki saari keys sirf is device ke browser storage mein save hoti hain.</p>
+
+    <!-- Anthropic -->
+    <label>Anthropic API Key</label>
+    <input type="password" id="apiKeyInput" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false" />
+
+    <hr class="modal-divider" />
+
+    <!-- Google Calendar -->
+    <label>Google Calendar</label>
+    <div class="gcal-status-line off" id="gcalStatusLine">Not connected</div>
+    <button class="gcal-connect-btn" id="gcalConnectBtn" onclick="connectGoogle()">
+      <span>📅</span> Connect Google Calendar
+    </button>
+
+    <button class="modal-save" onclick="saveSettings()">Save &amp; Close ✓</button>
+  </div>
+</div>
+
+<!-- ─── First-run API Key Modal ────────────────────────────────────────── -->
+<div class="overlay" id="firstRunOverlay">
+  <div class="modal">
+    <h2>🔑 Setup</h2>
+    <p>Shuru karne ke liye apna Anthropic API key daalen. Baad mein Google Calendar bhi connect kar sakte hain (⚙️).</p>
+    <label>Anthropic API Key</label>
+    <input type="password" id="firstRunKey" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false" />
+    <div id="firstRunError" style="color:#c0392b;font-size:13px;margin-top:6px;display:none;"></div>
+    <button class="modal-save" onclick="firstRunSave()">Start Chatting ✓</button>
+  </div>
+</div>
+
+<!-- ─── Header ───────────────────────────────────────────────────────── -->
+<header class="header">
+  <div class="avatar">🤖</div>
+  <div class="header-text">
+    <h1>Reminder AI</h1>
+    <p id="statusLine">online</p>
+  </div>
+  <div class="header-actions">
+    <!-- Calendar indicator / connect shortcut -->
+    <button class="hdr-btn" id="calBtn" onclick="calBtnClick()" title="Connect Google Calendar">📅</button>
+    <!-- Settings -->
+    <button class="hdr-btn" onclick="openSettings()" title="Settings">⚙️</button>
+  </div>
+</header>
+
+<!-- ─── Chat ─────────────────────────────────────────────────────────── -->
+<div class="chat-area" id="chatArea">
+  <div class="date-chip"><span id="todayChip"></span></div>
+</div>
+
+<!-- ─── Input Bar ─────────────────────────────────────────────────────── -->
+<div class="input-bar">
+  <div class="input-pill">
+    <textarea id="msgInput" rows="1"
+      placeholder="Reminder likhein… e.g. kal subah 9 baje gym"
+      oninput="autoGrow(this)"
+      onkeydown="onKey(event)"></textarea>
+  </div>
+  <button class="round-btn mic-btn" id="micBtn" onclick="toggleMic()" aria-label="Voice input">🎤</button>
+  <button class="round-btn send-btn" onclick="send()" aria-label="Send">
+    <svg viewBox="0 0 24 24" width="21" height="21" fill="white">
+      <path d="M1.1 21.76 23.8 12.03 1.1 2.3l.01 7.91 13.62 1.82L1.11 13.85l-.01 7.91z"/>
+    </svg>
+  </button>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
+  ██╔════╝██╔═══██╗████╗  ██║██╔════╝██║██╔════╝
+  ██║     ██║   ██║██╔██╗ ██║█████╗  ██║██║  ███╗
+  ██║     ██║   ██║██║╚██╗██║██╔══╝  ██║██║   ██║
+  ╚██████╗╚██████╔╝██║ ╚████║██║     ██║╚██████╔╝
+   ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝
+═══════════════════════════════════════════════════════════════════════ */
+
+/* ──────────────────────────────────────────────────────────────────────
+   CONFIG  ←  Edit these two values to set up Google Calendar
+   ──────────────────────────────────────────────────────────────────────
+   HOW TO GET GOOGLE_CLIENT_ID:
+   1. Go to https://console.cloud.google.com
+   2. Create/select a project → APIs & Services → Enable "Google Calendar API"
+   3. Credentials → Create Credentials → OAuth 2.0 Client ID
+   4. Application type: Web application
+   5. Authorized JavaScript origins:
+        http://localhost          (for local testing)
+        https://your-app.vercel.app   (for production)
+   6. Copy the Client ID below.
+
+   GOOGLE_API_KEY is included for future use but is NOT required for
+   OAuth-based Calendar access — the bearer token handles auth.
+────────────────────────────────────────────────────────────────────── */
+const GOOGLE_CLIENT_ID = '332796510111-tr0jo8r0hcklrgj8pqppn8kdrvpv1bvg.apps.googleusercontent.com';
+const GOOGLE_API_KEY   = 'YOUR_GOOGLE_API_KEY';   // optional, not used for OAuth
+
+const CLAUDE_MODEL  = 'claude-haiku-4-5-20251001';
+const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const CALENDAR_URL  = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+const TIMEZONE      = 'Asia/Kolkata';
+
+/* ═══════════════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════════════ */
+let apiKey          = localStorage.getItem('rmd_api_key') || '';
+let recognition     = null;
+let isListening     = false;
+
+// Google OAuth state (kept in memory — tokens expire, never persist to storage)
+let tokenClient     = null;
+let googleToken     = null;
+let tokenExpiry     = 0;
+
+// Pending reminder store: id → reminder object
+// Used so inline onclick buttons can reference extracted data safely
+const pendingMap    = new Map();
+let   pendingId     = 0;
+// After OAuth popup, if user clicked "Add to Calendar" for a specific reminder
+let   pendingRid    = null;
+
+/* ═══════════════════════════════════════════════════════════
+   BOOT
+═══════════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('todayChip').textContent =
+    new Date().toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'long' });
+
+  if (!apiKey) {
+    document.getElementById('firstRunOverlay').classList.remove('hidden');
+  } else {
+    document.getElementById('firstRunOverlay').classList.add('hidden');
+    greet();
+  }
+
+  autoGrow(document.getElementById('msgInput'));
+  syncCalStatus();
+});
+
+/* ═══════════════════════════════════════════════════════════
+   GOOGLE IDENTITY SERVICES INIT
+   (called via onload on the <script> tag above)
+═══════════════════════════════════════════════════════════ */
+function initGoogleAuth() {
+  if (!GOOGLE_CLIENT_ID || GOOGLE_CLIENT_ID.startsWith('YOUR_')) return;
+
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope:     'https://www.googleapis.com/auth/calendar.events',
+    callback:  onGoogleToken,
+  });
+}
+
+/* Called by GIS after user completes OAuth flow */
+function onGoogleToken(resp) {
+  if (resp.error) {
+    addBubble('received', '❌ Google sign-in failed: ' + resp.error);
+    syncCalStatus();
+    return;
+  }
+  googleToken  = resp.access_token;
+  tokenExpiry  = Date.now() + (resp.expires_in - 60) * 1000;   // 1 min safety buffer
+  syncCalStatus();
+
+  // If the user clicked "Add to Calendar" on a specific reminder before auth
+  if (pendingRid !== null) {
+    const rid = pendingRid;
+    pendingRid = null;
+    addReminderById(rid);
+  } else {
+    // General connect — just confirm
+    addBubble('received',
+      '✅ Google Calendar se connect ho gaya! Ab aapke reminders automatically calendar mein add honge. 🗓️'
+    );
+  }
+}
+
+function isCalConnected() {
+  return googleToken && Date.now() < tokenExpiry;
+}
+
+/* Update header button + settings modal status */
+function syncCalStatus() {
+  const btn    = document.getElementById('calBtn');
+  const line   = document.getElementById('gcalStatusLine');
+  const gbtn   = document.getElementById('gcalConnectBtn');
+  const ok     = isCalConnected();
+
+  btn.textContent = ok ? '✅' : '📅';
+  btn.classList.toggle('connected', ok);
+  btn.title = ok ? 'Calendar connected' : 'Connect Google Calendar';
+
+  if (line) {
+    line.textContent  = ok ? '✅ Connected to Google Calendar' : 'Not connected';
+    line.className    = 'gcal-status-line ' + (ok ? 'ok' : 'off');
+  }
+  if (gbtn) {
+    gbtn.textContent = ok ? '🔄 Reconnect' : '📅 Connect Google Calendar';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   GOOGLE OAUTH TRIGGERS
+═══════════════════════════════════════════════════════════ */
+function calBtnClick() {
+  if (isCalConnected()) {
+    openSettings();   // already connected — let them see status
+  } else {
+    connectGoogle();
+  }
+}
+
+function connectGoogle() {
+  if (!tokenClient) {
+    if (GOOGLE_CLIENT_ID.startsWith('YOUR_')) {
+      alert('Please add your Google Client ID in the CONFIG section at the top of this file.');
+    } else {
+      alert('Google auth library is still loading. Please try again in a moment.');
+    }
+    return;
+  }
+  // prompt: '' = silent refresh if already consented; 'consent' forces the chooser
+  tokenClient.requestAccessToken({ prompt: isCalConnected() ? '' : 'consent' });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   GOOGLE CALENDAR API
+═══════════════════════════════════════════════════════════ */
+async function createCalendarEvent(r) {
+  const startMs  = new Date(`${r.date}T${r.time}:00`).getTime();
+  const endMs    = startMs + 60 * 60 * 1000;   // default 1-hour event
+  const startISO = new Date(startMs).toISOString();
+  const endISO   = new Date(endMs).toISOString();
+
+  const event = {
+    summary: r.task,
+    start:   { dateTime: startISO, timeZone: TIMEZONE },
+    end:     { dateTime: endISO,   timeZone: TIMEZONE },
+    reminders: {
+      useDefault: false,
+      overrides:  [{ method: 'popup', minutes: 10 }],
+    },
+  };
+
+  const res = await fetch(CALENDAR_URL, {
+    method:  'POST',
+    headers: {
+      'Authorization': `Bearer ${googleToken}`,
+      'Content-Type':  'application/json',
+    },
+    body: JSON.stringify(event),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      // Token expired mid-session
+      googleToken = null; tokenExpiry = 0;
+      syncCalStatus();
+      throw new Error('Calendar session expire ho gayi. Please dobara connect karein (📅 button).');
+    }
+    throw new Error(body.error?.message || `Calendar API error ${res.status}`);
+  }
+
+  return await res.json();
+}
+
+/* Called from the "Add to Calendar" button rendered inside a bubble */
+async function addReminderById(rid) {
+  const r    = pendingMap.get(rid);
+  const wrap = document.getElementById(`calwrap-${rid}`);
+  if (!r || !wrap) return;
+
+  // If not connected yet, trigger OAuth and remember the rid
+  if (!isCalConnected()) {
+    pendingRid = rid;
+    connectGoogle();
+    return;
+  }
+
+  // Show loading state on button
+  const btn = wrap.querySelector('.cal-add-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="btn-icon">⏳</span> Adding…'; }
+
+  try {
+    await createCalendarEvent(r);
+    wrap.innerHTML = `
+      <div class="cal-added">
+        ✅ Google Calendar mein add ho gaya!
+        <span style="font-weight:400;font-size:12px">10 min pehle reminder milega</span>
+      </div>`;
+  } catch (err) {
+    wrap.innerHTML = `
+      <div class="cal-error-msg">⚠️ ${esc(err.message)}</div>
+      <button class="cal-add-btn" onclick="addReminderById(${rid})" style="margin-top:6px">
+        <span class="btn-icon">🔄</span> Retry
+      </button>`;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SETTINGS / API KEY
+═══════════════════════════════════════════════════════════ */
+function firstRunSave() {
+  const k   = document.getElementById('firstRunKey').value.trim();
+  const err = document.getElementById('firstRunError');
+  if (!k) {
+    err.textContent = '⚠️ API key daalen pehle.';
+    err.style.display = 'block';
+    return;
+  }
+  if (!k.startsWith('sk-')) {
+    err.textContent = '⚠️ Valid key chahiye — sk- se shuru honi chahiye.';
+    err.style.display = 'block';
+    return;
+  }
+  err.style.display = 'none';
+  apiKey = k;
+  localStorage.setItem('rmd_api_key', k);
+  document.getElementById('firstRunOverlay').classList.add('hidden');
+  greet();
+}
+
+function openSettings() {
+  document.getElementById('apiKeyInput').value = apiKey;
+  syncCalStatus();
+  document.getElementById('settingsOverlay').classList.remove('hidden');
+}
+
+function saveSettings() {
+  const k = document.getElementById('apiKeyInput').value.trim();
+  if (k && !k.startsWith('sk-')) {
+    alert('Valid Anthropic API key chahiye (sk- se shuru hona chahiye)');
+    return;
+  }
+  if (k) {
+    apiKey = k;
+    localStorage.setItem('rmd_api_key', k);
+  }
+  document.getElementById('settingsOverlay').classList.add('hidden');
+}
+
+/* ═══════════════════════════════════════════════════════════
+   WELCOME
+═══════════════════════════════════════════════════════════ */
+function greet() {
+  addBubble('received',
+    'Namaste! 🙏 Main aapka personal reminder assistant hoon.\n\n' +
+    'Mujhe Hindi, English ya Hinglish mein batayein:\n\n' +
+    '• "Kal subah 9 baje gym jaana hai"\n' +
+    '• "Doctor appointment Friday 3pm"\n' +
+    '• "Remind me to call Rahul at 6 PM today"\n\n' +
+    'Google Calendar connect karne ke liye upar 📅 tap karein.\n\n' +
+    'Boliye, kya reminder chahiye? 😊'
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SEND FLOW
+═══════════════════════════════════════════════════════════ */
+function onKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+}
+
+async function send() {
+  const el   = document.getElementById('msgInput');
+  const text = el.value.trim();
+  if (!text) return;
+  if (!apiKey) { document.getElementById('firstRunOverlay').classList.remove('hidden'); return; }
+
+  addBubble('sent', text);
+  el.value = '';
+  autoGrow(el);
+
+  const tid = showTyping();
+
+  try {
+    const reminder = await askClaude(text);
+    removeTyping(tid);
+    await showReminder(reminder);
+  } catch (err) {
+    removeTyping(tid);
+    addBubble('received', `❌ Kuch gadbad hui:\n${err.message}\n\nPlease ⚙️ mein API key check karein.`);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CLAUDE API
+═══════════════════════════════════════════════════════════ */
+async function askClaude(userText) {
+  const today = new Date().toLocaleDateString('en-CA');
+  const dow   = new Date().toLocaleDateString('en-IN', { weekday: 'long' });
+
+  const system = `You are a friendly reminder assistant that understands Hindi, English, and Hinglish.
+
+Today is ${today} (${dow}).
+
+TASK: Extract the reminder details and return ONLY a valid JSON object — no explanation, no markdown fences.
+
+Hindi/Hinglish hints:
+- kal = tomorrow | aaj = today | parso = day after tomorrow
+- subah = morning (default 09:00) | dopahar = afternoon (default 13:00)
+- shaam = evening (default 18:00) | raat = night (default 21:00)
+- baje = o'clock  e.g. "9 baje" → 09:00, "saadhe 9" → 09:30
+- If no date given → assume today; if the time has already passed today → assume tomorrow.
+- For weekday names (Monday/Somvar etc.) → use the next upcoming occurrence.
+
+Return exactly this JSON shape:
+{
+  "task": "<short task title in the user's own language mix>",
+  "date": "<YYYY-MM-DD>",
+  "time": "<HH:MM>",
+  "display_date": "<friendly, e.g. 'Kal, 10 April' or 'Aaj, 9 April' or 'Friday, 11 April'>",
+  "display_time": "<friendly, e.g. '9:00 AM' or '6:30 PM'>",
+  "message": "<warm 1–2 sentence confirmation in the same language mix the user wrote in, mention task + date + time, add a relevant emoji>"
+}`;
+
+  let res;
+  try {
+    res = await fetch(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type':                      'application/json',
+        'x-api-key':                         apiKey,
+        'anthropic-version':                 '2023-06-01',
+        'anthropic-dangerous-allow-browser': 'true',
+      },
+      body: JSON.stringify({
+        model:      CLAUDE_MODEL,
+        max_tokens: 512,
+        system,
+        messages: [{ role: 'user', content: userText }],
+      }),
+    });
+  } catch (networkErr) {
+    throw new Error(
+      'Network error — check your internet connection.\n' +
+      'If on Safari, try Chrome. Detail: ' + networkErr.message
+    );
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const msg  = body.error?.message || `HTTP ${res.status}`;
+    if (res.status === 401) throw new Error('Invalid API key (401). Please update it in ⚙️ Settings.');
+    if (res.status === 429) throw new Error('Rate limit reached. Please wait a moment and try again.');
+    throw new Error(msg);
+  }
+
+  const data = await res.json();
+  let raw = data.content[0].text.trim()
+    .replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
+
+  return JSON.parse(raw);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SHOW REMINDER + AUTO-ADD TO CALENDAR
+═══════════════════════════════════════════════════════════ */
+async function showReminder(r) {
+  const rid = ++pendingId;
+  pendingMap.set(rid, r);
+
+  // Build the calendar status section
+  let calHtml = `<div class="cal-status" id="calwrap-${rid}">`;
+
+  if (isCalConnected()) {
+    // Try to add automatically — show a temporary loading state first
+    calHtml += `<button class="cal-add-btn" disabled><span class="btn-icon">⏳</span> Adding to calendar…</button>`;
+  } else {
+    calHtml += `<button class="cal-add-btn" onclick="addReminderById(${rid})">
+      <span class="btn-icon">📅</span> Add to Google Calendar
+    </button>`;
+  }
+  calHtml += `</div>`;
+
+  const card = `
+    <div class="reminder-card">
+      <div class="card-row"><span class="ci">📌</span><span>${esc(r.task)}</span></div>
+      <div class="card-row"><span class="ci">📅</span><span>${esc(r.display_date)}</span></div>
+      <div class="card-row"><span class="ci">⏰</span><span>${esc(r.display_time)}</span></div>
+      ${calHtml}
+    </div>`;
+
+  addBubble('received', r.message, card);
+
+  // If already connected, auto-add in the background now that DOM is ready
+  if (isCalConnected()) {
+    // Small tick to let the DOM render the bubble first
+    await new Promise(r => setTimeout(r, 80));
+    addReminderById(rid);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   BUBBLE HELPERS
+═══════════════════════════════════════════════════════════ */
+function addBubble(type, text, extraHtml = '') {
+  const area = document.getElementById('chatArea');
+  const wrap = document.createElement('div');
+  wrap.className = `bwrap ${type}`;
+
+  const bub = document.createElement('div');
+  bub.className = `bubble ${type}`;
+  bub.innerHTML = esc(text).replace(/\n/g, '<br>') + extraHtml;
+
+  const meta = document.createElement('div');
+  meta.className = 'bubble-time';
+  meta.textContent = now();
+
+  wrap.appendChild(bub);
+  wrap.appendChild(meta);
+  area.appendChild(wrap);
+  scrollBottom();
+  return wrap;
+}
+
+function showTyping() {
+  const area = document.getElementById('chatArea');
+  const id   = 'tp_' + Date.now();
+  const div  = document.createElement('div');
+  div.className = 'typing-wrap';
+  div.id = id;
+  div.innerHTML = `<div class="typing-dots"><span></span><span></span><span></span></div>`;
+  area.appendChild(div);
+  scrollBottom();
+  return id;
+}
+function removeTyping(id) { document.getElementById(id)?.remove(); }
+
+/* ═══════════════════════════════════════════════════════════
+   VOICE INPUT
+═══════════════════════════════════════════════════════════ */
+function toggleMic() { isListening ? stopMic() : startMic(); }
+
+function startMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert('Voice input is not supported. Please use Chrome.'); return; }
+
+  recognition = new SR();
+  recognition.lang           = 'hi-IN';
+  recognition.continuous     = false;
+  recognition.interimResults = true;
+
+  recognition.onstart = () => {
+    isListening = true;
+    document.getElementById('micBtn').classList.add('recording');
+    document.getElementById('statusLine').textContent  = '🎤 Sun raha hoon…';
+    document.getElementById('msgInput').placeholder    = 'Bol rahe hain…';
+  };
+
+  recognition.onresult = (e) => {
+    let t = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) t += e.results[i][0].transcript;
+    const inp = document.getElementById('msgInput');
+    inp.value = t;
+    autoGrow(inp);
+  };
+
+  recognition.onerror = (e) => {
+    stopMic();
+    if (e.error === 'not-allowed')
+      alert('Microphone ka permission chahiye. Browser settings mein allow karein.');
+  };
+
+  recognition.onend = () => {
+    stopMic();
+    const text = document.getElementById('msgInput').value.trim();
+    if (text) send();
+  };
+
+  recognition.start();
+}
+
+function stopMic() {
+  recognition?.stop();
+  recognition = null;
+  isListening = false;
+  document.getElementById('micBtn').classList.remove('recording');
+  document.getElementById('statusLine').textContent = 'online';
+  document.getElementById('msgInput').placeholder   = 'Reminder likhein… e.g. kal subah 9 baje gym';
+}
+
+/* ═══════════════════════════════════════════════════════════
+   UTILITIES
+═══════════════════════════════════════════════════════════ */
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+}
+function scrollBottom() {
+  const a = document.getElementById('chatArea');
+  requestAnimationFrame(() => { a.scrollTop = a.scrollHeight; });
+}
+function now() {
+  return new Date().toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:true });
+}
+function esc(str) {
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(str || ''));
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>
