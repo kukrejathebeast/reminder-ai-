@@ -399,13 +399,7 @@
 <div class="overlay hidden" id="settingsOverlay">
   <div class="modal">
     <h2>⚙️ Settings</h2>
-    <p>Aapki saari keys sirf is device ke browser storage mein save hoti hain.</p>
-
-    <!-- Anthropic -->
-    <label>Anthropic API Key</label>
-    <input type="password" id="apiKeyInput" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false" />
-
-    <hr class="modal-divider" />
+    <p>Google Calendar connect karein taaki reminders automatically add hon.</p>
 
     <!-- Google Calendar -->
     <label>Google Calendar</label>
@@ -414,21 +408,10 @@
       <span>📅</span> Connect Google Calendar
     </button>
 
-    <button class="modal-save" onclick="saveSettings()">Save &amp; Close ✓</button>
+    <button class="modal-save" onclick="saveSettings()">Close ✓</button>
   </div>
 </div>
 
-<!-- ─── First-run API Key Modal ────────────────────────────────────────── -->
-<div class="overlay" id="firstRunOverlay">
-  <div class="modal">
-    <h2>🔑 Setup</h2>
-    <p>Shuru karne ke liye apna Anthropic API key daalen. Baad mein Google Calendar bhi connect kar sakte hain (⚙️).</p>
-    <label>Anthropic API Key</label>
-    <input type="password" id="firstRunKey" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false" />
-    <div id="firstRunError" style="color:#c0392b;font-size:13px;margin-top:6px;display:none;"></div>
-    <button class="modal-save" onclick="firstRunSave()">Start Chatting ✓</button>
-  </div>
-</div>
 
 <!-- ─── Header ───────────────────────────────────────────────────────── -->
 <header class="header">
@@ -496,14 +479,12 @@ const GOOGLE_CLIENT_ID = '332796510111-tr0jo8r0hcklrgj8pqppn8kdrvpv1bvg.apps.goo
 const GOOGLE_API_KEY   = 'YOUR_GOOGLE_API_KEY';   // optional, not used for OAuth
 
 const CLAUDE_MODEL  = 'claude-haiku-4-5-20251001';
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const CALENDAR_URL  = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
 const TIMEZONE      = 'Asia/Kolkata';
 
 /* ═══════════════════════════════════════════════════════════
    STATE
 ═══════════════════════════════════════════════════════════ */
-let apiKey          = localStorage.getItem('rmd_api_key') || '';
 let recognition     = null;
 let isListening     = false;
 
@@ -526,13 +507,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('todayChip').textContent =
     new Date().toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'long' });
 
-  if (!apiKey) {
-    document.getElementById('firstRunOverlay').classList.remove('hidden');
-  } else {
-    document.getElementById('firstRunOverlay').classList.add('hidden');
-    greet();
-  }
-
+  greet();
   autoGrow(document.getElementById('msgInput'));
   syncCalStatus();
 });
@@ -699,44 +674,14 @@ async function addReminderById(rid) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   SETTINGS / API KEY
+   SETTINGS
 ═══════════════════════════════════════════════════════════ */
-function firstRunSave() {
-  const k   = document.getElementById('firstRunKey').value.trim();
-  const err = document.getElementById('firstRunError');
-  if (!k) {
-    err.textContent = '⚠️ API key daalen pehle.';
-    err.style.display = 'block';
-    return;
-  }
-  if (!k.startsWith('sk-')) {
-    err.textContent = '⚠️ Valid key chahiye — sk- se shuru honi chahiye.';
-    err.style.display = 'block';
-    return;
-  }
-  err.style.display = 'none';
-  apiKey = k;
-  localStorage.setItem('rmd_api_key', k);
-  document.getElementById('firstRunOverlay').classList.add('hidden');
-  greet();
-}
-
 function openSettings() {
-  document.getElementById('apiKeyInput').value = apiKey;
   syncCalStatus();
   document.getElementById('settingsOverlay').classList.remove('hidden');
 }
 
 function saveSettings() {
-  const k = document.getElementById('apiKeyInput').value.trim();
-  if (k && !k.startsWith('sk-')) {
-    alert('Valid Anthropic API key chahiye (sk- se shuru hona chahiye)');
-    return;
-  }
-  if (k) {
-    apiKey = k;
-    localStorage.setItem('rmd_api_key', k);
-  }
   document.getElementById('settingsOverlay').classList.add('hidden');
 }
 
@@ -766,7 +711,6 @@ async function send() {
   const el   = document.getElementById('msgInput');
   const text = el.value.trim();
   if (!text) return;
-  if (!apiKey) { document.getElementById('firstRunOverlay').classList.remove('hidden'); return; }
 
   addBubble('sent', text);
   el.value = '';
@@ -817,14 +761,9 @@ Return exactly this JSON shape:
 
   let res;
   try {
-    res = await fetch(ANTHROPIC_URL, {
+    res = await fetch('/api/chat', {
       method: 'POST',
-      headers: {
-        'Content-Type':                      'application/json',
-        'x-api-key':                         apiKey,
-        'anthropic-version':                 '2023-06-01',
-        'anthropic-dangerous-allow-browser': 'true',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model:      CLAUDE_MODEL,
         max_tokens: 512,
@@ -833,16 +772,12 @@ Return exactly this JSON shape:
       }),
     });
   } catch (networkErr) {
-    throw new Error(
-      'Network error — check your internet connection.\n' +
-      'If on Safari, try Chrome. Detail: ' + networkErr.message
-    );
+    throw new Error('Network error: ' + networkErr.message);
   }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const msg  = body.error?.message || `HTTP ${res.status}`;
-    if (res.status === 401) throw new Error('Invalid API key (401). Please update it in ⚙️ Settings.');
     if (res.status === 429) throw new Error('Rate limit reached. Please wait a moment and try again.');
     throw new Error(msg);
   }
