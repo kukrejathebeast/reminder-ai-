@@ -494,11 +494,13 @@ let googleToken     = null;
 let tokenExpiry     = 0;
 
 // Pending reminder store: id → reminder object
-// Used so inline onclick buttons can reference extracted data safely
 const pendingMap    = new Map();
 let   pendingId     = 0;
 // After OAuth popup, if user clicked "Add to Calendar" for a specific reminder
 let   pendingRid    = null;
+
+// Recently added calendar events: { id, task, calEventId }
+const recentCalEvents = [];
 
 /* ═══════════════════════════════════════════════════════════
    BOOT
@@ -658,7 +660,9 @@ async function addReminderById(rid) {
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="btn-icon">⏳</span> Adding…'; }
 
   try {
-    await createCalendarEvent(r);
+    const calEvent = await createCalendarEvent(r);
+    // Store event ID so user can delete it later
+    recentCalEvents.push({ task: r.task, date: r.date, calEventId: calEvent.id });
     wrap.innerHTML = `
       <div class="cal-added">
         ✅ Google Calendar mein add ho gaya!
@@ -671,6 +675,47 @@ async function addReminderById(rid) {
         <span class="btn-icon">🔄</span> Retry
       </button>`;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DELETE CALENDAR EVENTS
+═══════════════════════════════════════════════════════════ */
+async function handleDelete(result) {
+  const ids = result.calEventIds || [];
+
+  if (!isCalConnected()) {
+    addBubble('received', '⚠️ Calendar connected nahi hai. Pehle 📅 se connect karein.');
+    return;
+  }
+
+  if (ids.length === 0) {
+    addBubble('received', result.message || '⚠️ Koi recent event nahi mila delete karne ke liye.');
+    return;
+  }
+
+  let deleted = 0, failed = 0;
+  for (const id of ids) {
+    try {
+      const res = await fetch(`${CALENDAR_URL}/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${googleToken}` },
+      });
+      if (res.ok || res.status === 204 || res.status === 404) {
+        deleted++;
+        // Remove from local store
+        const idx = recentCalEvents.findIndex(e => e.calEventId === id);
+        if (idx !== -1) recentCalEvents.splice(idx, 1);
+      } else {
+        failed++;
+      }
+    } catch { failed++; }
+  }
+
+  const msg = failed === 0
+    ? `✅ ${deleted} reminder${deleted > 1 ? 's' : ''} Google Calendar se delete ho gaye! 🗑️`
+    : `⚠️ ${deleted} deleted, ${failed} delete nahi ho sake. Please manually check karein.`;
+
+  addBubble('received', msg);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -719,12 +764,18 @@ async function send() {
   const tid = showTyping();
 
   try {
-    const reminder = await askClaude(text);
+    const result = await askClaude(text);
     removeTyping(tid);
-    await showReminder(reminder);
+    if (result.intent === 'delete') {
+      await handleDelete(result);
+    } else if (result.intent === 'chat') {
+      addBubble('received', result.message);
+    } else {
+      await showReminder(result); // 'add' intent
+    }
   } catch (err) {
     removeTyping(tid);
-    addBubble('received', `❌ Kuch gadbad hui:\n${err.message}\n\nPlease ⚙️ mein API key check karein.`);
+    addBubble('received', `❌ Kuch gadbad hui:\n${err.message}`);
   }
 }
 
@@ -735,28 +786,47 @@ async function askClaude(userText) {
   const today = new Date().toLocaleDateString('en-CA');
   const dow   = new Date().toLocaleDateString('en-IN', { weekday: 'long' });
 
+  // Give Claude context of recently added events so it can handle "remove both" etc.
+  const recentContext = recentCalEvents.length
+    ? '\n\nRecently added reminders:\n' +
+      recentCalEvents.slice(-5).map((e,i) => `${i+1}. "${e.task}" on ${e.date} (calEventId: ${e.calEventId})`).join('\n')
+    : '';
+
   const system = `You are a friendly reminder assistant that understands Hindi, English, and Hinglish.
 
-Today is ${today} (${dow}).
+Today is ${today} (${dow}).${recentContext}
 
-TASK: Extract the reminder details and return ONLY a valid JSON object — no explanation, no markdown fences.
+Understand the user's INTENT and return ONLY a valid JSON object — no explanation, no markdown fences.
 
 Hindi/Hinglish hints:
 - kal = tomorrow | aaj = today | parso = day after tomorrow
 - subah = morning (default 09:00) | dopahar = afternoon (default 13:00)
 - shaam = evening (default 18:00) | raat = night (default 21:00)
-- baje = o'clock  e.g. "9 baje" → 09:00, "saadhe 9" → 09:30
-- If no date given → assume today; if the time has already passed today → assume tomorrow.
-- For weekday names (Monday/Somvar etc.) → use the next upcoming occurrence.
+- baje = o'clock e.g. "9 baje" → 09:00
 
-Return exactly this JSON shape:
+INTENT 1 — Adding a reminder. Return:
 {
-  "task": "<short task title in the user's own language mix>",
+  "intent": "add",
+  "task": "<short task title>",
   "date": "<YYYY-MM-DD>",
   "time": "<HH:MM>",
-  "display_date": "<friendly, e.g. 'Kal, 10 April' or 'Aaj, 9 April' or 'Friday, 11 April'>",
-  "display_time": "<friendly, e.g. '9:00 AM' or '6:30 PM'>",
-  "message": "<warm 1–2 sentence confirmation in the same language mix the user wrote in, mention task + date + time, add a relevant emoji>"
+  "display_date": "<e.g. 'Kal, 10 April'>",
+  "display_time": "<e.g. '9:00 AM'>",
+  "message": "<warm confirmation in user's language with emoji>"
+}
+
+INTENT 2 — Deleting/removing reminders. Return:
+{
+  "intent": "delete",
+  "calEventIds": ["<id1>", "<id2>"],
+  "message": "<confirmation message in user's language>"
+}
+Use calEventIds from the recently added reminders list above. If user says "both", include all recent IDs. If no IDs available, return empty array.
+
+INTENT 3 — General chat / question (not a reminder). Return:
+{
+  "intent": "chat",
+  "message": "<helpful reply in the same language>"
 }`;
 
   let res;
@@ -786,7 +856,12 @@ Return exactly this JSON shape:
   let raw = data.content[0].text.trim()
     .replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
 
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    // Claude returned plain text — treat as chat reply
+    return { intent: 'chat', message: raw };
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════
