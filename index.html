@@ -390,6 +390,28 @@
       margin: 18px 0 14px;
     }
 
+    /* ── Language toggle ── */
+    .lang-toggle {
+      height: 36px;
+      padding: 0 11px;
+      border-radius: 18px;
+      border: 2px solid var(--green-light);
+      background: #fff;
+      color: var(--green-dark);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all .2s;
+      -webkit-tap-highlight-color: transparent;
+      letter-spacing: .5px;
+    }
+    .lang-toggle.hindi {
+      background: var(--green-dark);
+      color: #fff;
+      border-color: var(--green-dark);
+    }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -441,6 +463,7 @@
       oninput="autoGrow(this)"
       onkeydown="onKey(event)"></textarea>
   </div>
+  <button class="lang-toggle" id="langBtn" onclick="toggleLang()" title="Switch language">EN</button>
   <button class="round-btn mic-btn" id="micBtn" onclick="toggleMic()" aria-label="Voice input">🎤</button>
   <button class="round-btn send-btn" onclick="send()" aria-label="Send">
     <svg viewBox="0 0 24 24" width="21" height="21" fill="white">
@@ -487,6 +510,7 @@ const TIMEZONE      = 'Asia/Kolkata';
 ═══════════════════════════════════════════════════════════ */
 let recognition     = null;
 let isListening     = false;
+let currentLang     = 'en-IN'; // en-IN = Hinglish/Indian English (default), hi-IN = pure Hindi
 
 // Google OAuth state (kept in memory — tokens expire, never persist to storage)
 let tokenClient     = null;
@@ -681,41 +705,75 @@ async function addReminderById(rid) {
    DELETE CALENDAR EVENTS
 ═══════════════════════════════════════════════════════════ */
 async function handleDelete(result) {
-  const ids = result.calEventIds || [];
-
   if (!isCalConnected()) {
     addBubble('received', '⚠️ Calendar connected nahi hai. Pehle 📅 se connect karein.');
     return;
   }
 
-  if (ids.length === 0) {
-    addBubble('received', result.message || '⚠️ Koi recent event nahi mila delete karne ke liye.');
+  const queries = result.search_queries || [];
+  if (queries.length === 0) {
+    addBubble('received', result.message || '⚠️ Koi event nahi mila delete karne ke liye.');
     return;
   }
 
-  let deleted = 0, failed = 0;
-  for (const id of ids) {
-    try {
-      const res = await fetch(`${CALENDAR_URL}/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${googleToken}` },
-      });
-      if (res.ok || res.status === 204 || res.status === 404) {
-        deleted++;
-        // Remove from local store
-        const idx = recentCalEvents.findIndex(e => e.calEventId === id);
-        if (idx !== -1) recentCalEvents.splice(idx, 1);
-      } else {
-        failed++;
-      }
-    } catch { failed++; }
+  // Show searching indicator
+  const tid = showTyping();
+
+  try {
+    // Search Calendar for each query and collect matching event IDs
+    const toDelete = new Map(); // id → summary (deduplicate)
+
+    for (const q of queries) {
+      const events = await searchCalendarEvents(q);
+      for (const ev of events) toDelete.set(ev.id, ev.summary);
+    }
+
+    removeTyping(tid);
+
+    if (toDelete.size === 0) {
+      addBubble('received', '⚠️ Google Calendar mein koi matching event nahi mila.');
+      return;
+    }
+
+    // Delete all found events
+    let deleted = 0, failed = 0;
+    for (const [id] of toDelete) {
+      try {
+        const res = await fetch(`${CALENDAR_URL}/${id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${googleToken}` },
+        });
+        if (res.ok || res.status === 204 || res.status === 404) deleted++;
+        else failed++;
+      } catch { failed++; }
+    }
+
+    const names = [...toDelete.values()].map(n => `"${n}"`).join(', ');
+    const msg = failed === 0
+      ? `✅ ${deleted} event${deleted > 1 ? 's' : ''} delete ho gaye: ${names} 🗑️`
+      : `⚠️ ${deleted} deleted, ${failed} delete nahi ho sake.`;
+    addBubble('received', msg);
+
+  } catch (err) {
+    removeTyping(tid);
+    addBubble('received', '❌ Delete karte waqt error: ' + err.message);
   }
+}
 
-  const msg = failed === 0
-    ? `✅ ${deleted} reminder${deleted > 1 ? 's' : ''} Google Calendar se delete ho gaye! 🗑️`
-    : `⚠️ ${deleted} deleted, ${failed} delete nahi ho sake. Please manually check karein.`;
-
-  addBubble('received', msg);
+async function searchCalendarEvents(query) {
+  // Search past 7 days + next 30 days
+  const timeMin = new Date(Date.now() - 7  * 86400000).toISOString();
+  const timeMax = new Date(Date.now() + 30 * 86400000).toISOString();
+  const params  = new URLSearchParams({
+    q: query, timeMin, timeMax,
+    singleEvents: 'true', orderBy: 'startTime', maxResults: '10',
+  });
+  const res = await fetch(`${CALENDAR_URL}?${params}`, {
+    headers: { 'Authorization': `Bearer ${googleToken}` },
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.items || [];
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -818,10 +876,10 @@ INTENT 1 — Adding a reminder. Return:
 INTENT 2 — Deleting/removing reminders. Return:
 {
   "intent": "delete",
-  "calEventIds": ["<id1>", "<id2>"],
+  "search_queries": ["<keyword to search event 1>", "<keyword to search event 2>"],
   "message": "<confirmation message in user's language>"
 }
-Use calEventIds from the recently added reminders list above. If user says "both", include all recent IDs. If no IDs available, return empty array.
+Extract meaningful search keywords from the user's message or from the recent reminders context. If user says "dono" or "both", include search terms for all recent reminders. Always return at least one search query if any reminders were mentioned.
 
 INTENT 3 — General chat / question (not a reminder). Return:
 {
@@ -856,12 +914,23 @@ INTENT 3 — General chat / question (not a reminder). Return:
   let raw = data.content[0].text.trim()
     .replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
 
+  let parsed;
   try {
-    return JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch (e) {
-    // Claude returned plain text — treat as chat reply
     return { intent: 'chat', message: raw };
   }
+
+  // Validate "add" intent — reject garbage data
+  if (parsed.intent === 'add') {
+    const validDate = /^\d{4}-\d{2}-\d{2}$/.test(parsed.date);
+    const validTime = /^\d{2}:\d{2}$/.test(parsed.time);
+    if (!validDate || !validTime || !parsed.task) {
+      return { intent: 'chat', message: parsed.message || 'Mujhe samajh nahi aaya. Kya aap reminder details dobara bata sakte hain?' };
+    }
+  }
+
+  return parsed;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -941,6 +1010,20 @@ function removeTyping(id) { document.getElementById(id)?.remove(); }
 /* ═══════════════════════════════════════════════════════════
    VOICE INPUT
 ═══════════════════════════════════════════════════════════ */
+function toggleLang() {
+  currentLang = currentLang === 'en-IN' ? 'hi-IN' : 'en-IN';
+  const btn   = document.getElementById('langBtn');
+  if (currentLang === 'hi-IN') {
+    btn.textContent = 'HI';
+    btn.classList.add('hindi');
+    btn.title = 'Hindi mode — tap to switch to Hinglish';
+  } else {
+    btn.textContent = 'EN';
+    btn.classList.remove('hindi');
+    btn.title = 'Hinglish mode — tap to switch to Hindi';
+  }
+}
+
 function toggleMic() { isListening ? stopMic() : startMic(); }
 
 function startMic() {
@@ -948,7 +1031,7 @@ function startMic() {
   if (!SR) { alert('Voice input is not supported. Please use Chrome.'); return; }
 
   recognition = new SR();
-  recognition.lang           = 'hi-IN';
+  recognition.lang           = currentLang;
   recognition.continuous     = false;
   recognition.interimResults = true;
 
